@@ -717,6 +717,36 @@ def main():
                             wfig.update_layout(height=260, margin=dict(t=40,b=10))
                             st.plotly_chart(wfig, use_container_width=True)
 
+                    # Preset save/load controls
+                    st.subheader("Presets")
+                    if 'weight_presets' not in st.session_state:
+                        st.session_state.weight_presets = {}
+                    preset_cols = st.columns([2, 2, 1])
+                    with preset_cols[0]:
+                        preset_name = st.text_input("Preset name", value="My Strategy", key="bt_preset_name")
+                        if st.button("💾 Save preset", key="bt_save_preset"):
+                            if preset_name.strip():
+                                st.session_state.weight_presets[preset_name.strip()] = dict(bt_weights)
+                                st.success(f"Saved preset '{preset_name.strip()}'")
+                            else:
+                                st.warning("Enter a preset name before saving.")
+                    with preset_cols[1]:
+                        load_choice = st.selectbox(
+                            "Load preset",
+                            ["-- Select --"] + list(st.session_state.weight_presets.keys()),
+                            key="bt_load_preset"
+                        )
+                        if load_choice and load_choice != "-- Select --":
+                            bt_weights = dict(st.session_state.weight_presets[load_choice])
+                            st.info(f"Loaded preset '{load_choice}'")
+                    with preset_cols[2]:
+                        if st.button("🗑️ Delete", key="bt_delete_preset"):
+                            if load_choice and load_choice != "-- Select --":
+                                del st.session_state.weight_presets[load_choice]
+                                st.success(f"Deleted preset '{load_choice}'")
+                            else:
+                                st.warning("Select a preset to delete.")
+
                     # Prepare data for backtest
                     if isinstance(bt_dates, (list, tuple)) and len(bt_dates) == 2:
                         bt_start = pd.to_datetime(bt_dates[0])
@@ -730,6 +760,101 @@ def main():
                     if nav_bt.empty or bench_bt.empty:
                         st.warning("No data available for the selected backtest period.")
                     else:
+                        # Multi-strategy comparison
+                        # Build available strategies map
+                        strategies_map = {
+                            "Current Config": dict(bt_weights)
+                        }
+                        # Built-ins
+                        strategies_map.update({
+                            "Composite": {'sharpe_ratio': 0.25, 'sortino_ratio': 0.25, 'information_ratio': 0.2, 'max_drawdown': -0.1, 'annual_return': 0.2, 'annual_volatility': -0.1, 'tracking_error': -0.1},
+                            "Momentum": {'annual_return': 0.4, 'sharpe_ratio': 0.3, 'beta': -0.2, 'max_drawdown': -0.1},
+                            "Consistency": {'sortino_ratio': 0.4, 'information_ratio': 0.3, 'max_drawdown': -0.2, 'annual_volatility': -0.1},
+                            "Risk-Adjusted": {'sharpe_ratio': 0.4, 'sortino_ratio': 0.4, 'max_drawdown': -0.2},
+                        })
+                        # Dashboard custom as an option
+                        if st.session_state.get('custom_weights_active', False) and 'custom_weights' in st.session_state:
+                            strategies_map["Dashboard Custom"] = dict(st.session_state.custom_weights)
+                        # User presets
+                        for pname, pweights in st.session_state.get('weight_presets', {}).items():
+                            strategies_map[f"Preset: {pname}"] = dict(pweights)
+
+                        compare_choices = st.multiselect(
+                            "Compare strategies (select 2 or more to overlay)",
+                            options=list(strategies_map.keys()),
+                            default=[]
+                        )
+
+                        if compare_choices:
+                            try:
+                                # Map UI frequency to code
+                                if rebalance == 'Monthly':
+                                    rb = 'M'
+                                elif rebalance == 'Quarterly':
+                                    rb = 'Q'
+                                else:
+                                    rb = '6M'
+
+                                combined = pd.DataFrame()
+                                metrics_list = []
+                                for name in compare_choices:
+                                    wts = strategies_map[name]
+                                    try:
+                                        eq_i, m_i, _hold_i = run_backtest(
+                                            nav_data=nav_bt,
+                                            benchmark_series=bench_bt,
+                                            metrics_weights=wts,
+                                            risk_free_rate=risk_free_rate,
+                                            rebalance_freq=rb,
+                                            lookback_days=lookback_days,
+                                            top_n=top_n
+                                        )
+                                    except ValueError:
+                                        eq_i, m_i = run_backtest(
+                                            nav_data=nav_bt,
+                                            benchmark_series=bench_bt,
+                                            metrics_weights=wts,
+                                            risk_free_rate=risk_free_rate,
+                                            rebalance_freq=rb,
+                                            lookback_days=lookback_days,
+                                            top_n=top_n
+                                        )
+                                    # Align on index
+                                    if combined.empty:
+                                        combined = eq_i[['Strategy']].rename(columns={'Strategy': name})
+                                    else:
+                                        combined = combined.join(eq_i[['Strategy']].rename(columns={'Strategy': name}), how='outer')
+                                    # Collect metrics (Strategy row only)
+                                    row = m_i.loc['Strategy']
+                                    row.name = name
+                                    metrics_list.append(row)
+
+                                # Plot combined equity curves
+                                st.subheader("Strategy Comparison")
+                                comb_df = combined.sort_index().copy()
+                                comb_plot_df = comb_df.reset_index()
+                                if 'index' in comb_plot_df.columns:
+                                    comb_plot_df = comb_plot_df.rename(columns={'index': 'date'})
+                                elif comb_plot_df.columns[0] != 'date':
+                                    comb_plot_df = comb_plot_df.rename(columns={comb_plot_df.columns[0]: 'date'})
+                                comp_fig = px.line(comb_plot_df, x='date', y=compare_choices, title='Equity Curves: Multi-Strategy')
+                                st.plotly_chart(comp_fig, use_container_width=True)
+
+                                # Metrics table
+                                if metrics_list:
+                                    comp_metrics = pd.DataFrame(metrics_list)
+                                    # Format select columns
+                                    for col in ["CAGR", "Volatility", "Total Return", "Max Drawdown"]:
+                                        if col in comp_metrics.columns:
+                                            comp_metrics[col] = comp_metrics[col].apply(lambda x: f"{x*100:.2f}%" if pd.notnull(x) else "N/A")
+                                    if 'Sharpe' in comp_metrics.columns:
+                                        comp_metrics['Sharpe'] = comp_metrics['Sharpe'].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "N/A")
+                                    st.dataframe(comp_metrics, use_container_width=True)
+                                # Skip single-run section when comparison is shown
+                                st.stop()
+                            except Exception as e:
+                                st.error(f"Comparison failed: {e}")
+
                         try:
                             if rebalance == 'Monthly':
                                 rb = 'M'
