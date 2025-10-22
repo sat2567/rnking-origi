@@ -170,6 +170,23 @@ def run_backtest(
 
     # Metrics
     periods_per_year = 252
+    
+    # Calculate alpha and beta for the strategy
+    rf_per_period = (1 + risk_free_rate) ** (1 / periods_per_year) - 1
+    strat_excess = strategy_daily - rf_per_period
+    bench_excess = bench_rets.loc[strategy_daily.index] - rf_per_period
+    
+    # Beta: covariance / variance
+    if not strat_excess.empty and not bench_excess.empty:
+        covariance = np.cov(strat_excess, bench_excess)[0, 1]
+        bench_variance = np.var(bench_excess)
+        beta = covariance / bench_variance if bench_variance != 0 else np.nan
+        # Alpha (annualized)
+        alpha = (strat_excess.mean() - beta * bench_excess.mean()) * periods_per_year
+    else:
+        beta = np.nan
+        alpha = np.nan
+    
     metrics = {
         'CAGR': [
             compute_cagr(equity_df['Strategy'], periods_per_year),
@@ -190,7 +207,9 @@ def run_backtest(
         'Total Return': [
             equity_df['Strategy'].iloc[-1] - 1 if not equity_df['Strategy'].empty else np.nan,
             equity_df['Benchmark'].iloc[-1] - 1 if not equity_df['Benchmark'].empty else np.nan,
-        ]
+        ],
+        'Alpha': [alpha, 0.0],  # Strategy alpha vs benchmark (benchmark alpha is 0 by definition)
+        'Beta': [beta, 1.0],  # Strategy beta vs benchmark (benchmark beta is 1 by definition)
     }
     metrics_df = pd.DataFrame(metrics, index=['Strategy', 'Benchmark'])
 
