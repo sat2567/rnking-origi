@@ -21,6 +21,7 @@ from src import visualization
 import src.ranking as ranking
 from src.backtesting import run_backtest
 from src.ranking import calculate_composite_score, get_top_funds
+from src.forecasting import forecast_next_6m_returns, to_monthly_returns
 
 # Set page config
 st.set_page_config(
@@ -356,7 +357,13 @@ def main():
                 st.markdown("---")  # Separator
 
                 # Create tabs for different sections
-                tab1, tab2, tab3 = st.tabs(["Performance Metrics", "Ranking Metrics", "Backtesting"])
+                tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                    "Performance Metrics",
+                    "Ranking Metrics",
+                    "Backtesting",
+                    "Predictive Analytics",
+                    "Documentation"
+                ])
 
                 with tab1:
                     st.header("Performance Metrics")
@@ -577,6 +584,158 @@ def main():
                             mime="text/csv",
                             key=f"download_rankings_{ranking_criteria}"
                         )
+                    
+                    # Quarterly Rankings Section
+                    st.divider()
+                    st.subheader("📊 Quarterly Composite Score Rankings")
+                    st.caption(f"Rankings based on: **{ranking_criteria}** criteria (Lower rank = Better performance)")
+                    
+                    if not nav_data.empty:
+                        # Get the last 3 years of quarterly dates
+                        end_date = pd.Timestamp.now()
+                        start_date_qtr = end_date - pd.DateOffset(years=3)
+
+                        # Generate all quarters in the 3-year period
+                        all_quarters = pd.date_range(
+                            start=start_date_qtr,
+                            end=end_date,
+                            freq='Q'
+                        )
+
+                        # Create a DataFrame with all funds and all quarters
+                        columns = [f"{q.year} Q{q.quarter}" for q in all_quarters]
+                        rankings_df = pd.DataFrame(index=selected_funds, columns=columns, dtype='float64')
+
+                        # Optional on-screen debug logs
+                        debug_logs = st.checkbox("Show quarterly rankings debug logs", value=False)
+                        def dbg(msg: str):
+                            if debug_logs:
+                                st.text(str(msg))
+                        
+                        if debug_logs:
+                            dbg("=== Data Availability Check ===")
+                            dbg(f"Date range: {nav_data.index.min()} to {nav_data.index.max()}")
+                            dbg(f"Selected funds: {len(selected_funds)} funds")
+                            dbg(f"Using ranking criteria: {ranking_criteria}")
+                            dbg(f"Metrics weights: {metrics_weights}")
+                            dbg("=== Processing Quarters ===")
+
+                        # Calculate rankings for each quarter
+                        quarters_with_data = 0
+
+                        for date in all_quarters:
+                            # Get data for this specific quarter only
+                            start_qtr = date - pd.offsets.QuarterEnd() + pd.offsets.Day(1)  # Start of quarter
+                            q_data = nav_data[(nav_data.index >= start_qtr) & (nav_data.index <= date)]
+
+                            if debug_logs:
+                                dbg(f"Processing {date.year} Q{date.quarter} ({start_qtr} to {date}):")
+                                dbg(f"  - Found {len(q_data)} data points")
+
+                            # Skip if no data at all
+                            if q_data.empty:
+                                if debug_logs:
+                                    dbg("  - No data for this quarter")
+                                continue
+
+                            # Get funds with at least 2 data points in this quarter
+                            valid_funds = [col for col in selected_funds if col in q_data.columns and q_data[col].count() >= 2]
+
+                            if debug_logs:
+                                dbg(f"  - Funds with enough data: {len(valid_funds)}/{len(selected_funds)}")
+
+                            if not valid_funds:
+                                if debug_logs:
+                                    dbg("  - No funds with enough data for this quarter")
+                                continue
+
+                            try:
+                                # Calculate composite scores for this quarter using SAME criteria
+                                q_benchmark = benchmark_series[(benchmark_series.index >= start_qtr) &
+                                                             (benchmark_series.index <= date)]
+
+                                if q_benchmark.empty or len(q_benchmark) < 2:
+                                    if debug_logs:
+                                        dbg(f"  - Not enough benchmark data for {date.year} Q{date.quarter}")
+                                    continue
+
+                                if debug_logs:
+                                    dbg(f"  - Calculating composite scores for {len(valid_funds)} funds")
+
+                                q_metrics = calculate_composite_score(
+                                    nav_data=q_data[valid_funds],
+                                    benchmark_series=q_benchmark,
+                                    risk_free_rate=risk_free_rate,
+                                    metrics_weights=metrics_weights  # Uses the same weights from ranking criteria!
+                                )
+
+                                if not q_metrics.empty and 'composite_score' in q_metrics.columns:
+                                    rank_col = f"{date.year} Q{date.quarter}"
+                                    # Initialize series with NaN for all funds
+                                    ranked = pd.Series(index=selected_funds, dtype='float64')
+                                    # Fill in ranks for funds with valid data
+                                    ranked[q_metrics.index] = q_metrics['composite_score'].rank(ascending=False, method='min')
+                                    # Add to our rankings DataFrame
+                                    rankings_df[rank_col] = ranked.astype('Int64')
+                                    quarters_with_data += 1
+
+                            except Exception as e:
+                                if debug_logs:
+                                    dbg(f"Error calculating quarterly composite for {date}: {str(e)}")
+                                continue
+
+                        if quarters_with_data == 0:
+                            st.warning("Insufficient historical data to generate quarterly rankings. Need at least one quarter with valid data.")
+                        else:
+                            # Convert to numeric
+                            rankings_df = rankings_df.apply(pd.to_numeric, errors='coerce')
+
+                            # Convert to Int64 where appropriate
+                            def safe_convert_to_int(series):
+                                if (series.dropna() % 1 == 0).all():
+                                    return series.astype('Int64')
+                                return series
+
+                            rankings_df = rankings_df.apply(safe_convert_to_int)
+
+                            # Drop columns that are all NaN
+                            rankings_df = rankings_df.dropna(axis=1, how='all')
+
+                            # Sort columns chronologically
+                            if not rankings_df.empty and len(rankings_df.columns) > 0:
+                                rankings_df = rankings_df[sorted(rankings_df.columns)]
+
+                            if not rankings_df.empty:
+                                # Add current rank as the last column
+                                if 'composite_score' in metrics_df.columns:
+                                    current_rank = metrics_df['composite_score'].rank(ascending=False).astype(int)
+                                    rankings_df['Current Rank'] = current_rank
+
+                                # Display the rankings table
+                                st.dataframe(
+                                    rankings_df,
+                                    use_container_width=True,
+                                    height=min(800, 100 + 35 * len(rankings_df)),
+                                    column_config={
+                                        col: st.column_config.NumberColumn(
+                                            col,
+                                            format="%d",
+                                            help=f"Ranking as of {col} (1 = best)"
+                                        ) for col in rankings_df.columns
+                                    }
+                                )
+
+                                # Add download button for quarterly rankings
+                                qtr_csv = rankings_df.to_csv()
+                                st.download_button(
+                                    label="📥 Download Quarterly Rankings",
+                                    data=qtr_csv,
+                                    file_name=f"quarterly_rankings_{ranking_criteria.lower().replace(' ', '_')}.csv",
+                                    mime="text/csv",
+                                    key="download_quarterly_rankings"
+                                )
+                            else:
+                                st.warning("Insufficient historical data to generate quarterly rankings.")
 
                     # Calculate alpha and beta for each fund if benchmark is available
                     if benchmark_series is not None and not benchmark_series.empty:
@@ -669,12 +828,6 @@ def main():
                                 'information_ratio': 0.3,
                                 'max_drawdown': -0.2,
                                 'annual_volatility': -0.1
-                            }
-                        else:  # Risk-Adjusted Returns
-                            bt_weights = {
-                                'sharpe_ratio': 0.4,
-                                'sortino_ratio': 0.4,
-                                'max_drawdown': -0.2
                             }
 
                     # Inline fine-tune weights (overrides selection above when enabled)
@@ -895,6 +1048,7 @@ def main():
                             elif eq_df.columns[0] != 'date':
                                 # Fallback: force first column to 'date'
                                 eq_df = eq_df.rename(columns={eq_df.columns[0]: 'date'})
+                            
                             eq_plot = px.line(
                                 eq_df,
                                 x='date',
@@ -907,16 +1061,40 @@ def main():
                             # Show metrics
                             st.subheader("Backtest Metrics")
                             display_metrics = metrics_df.copy()
-                            for col in ["CAGR", "Volatility", "Total Return", "Max Drawdown"]:
+                            for col in ["CAGR", "Volatility", "Total Return", "Max Drawdown", "Alpha"]:
                                 if col in display_metrics.columns:
                                     display_metrics[col] = display_metrics[col].apply(
                                         lambda x: f"{x*100:.2f}%" if pd.notnull(x) else "N/A"
                                     )
-                            if 'Sharpe' in display_metrics.columns:
-                                display_metrics['Sharpe'] = display_metrics['Sharpe'].apply(
-                                    lambda x: f"{x:.2f}" if pd.notnull(x) else "N/A"
-                                )
+                            for col in ['Sharpe', 'Beta']:
+                                if col in display_metrics.columns:
+                                    display_metrics[col] = display_metrics[col].apply(
+                                        lambda x: f"{x:.3f}" if pd.notnull(x) else "N/A"
+                                    )
                             st.dataframe(display_metrics, use_container_width=True)
+                            
+                            # Highlight key metrics
+                            if 'Alpha' in metrics_df.columns and 'Beta' in metrics_df.columns:
+                                st.markdown("### 📊 Strategy Performance vs Benchmark")
+                                metric_cols = st.columns(4)
+                                with metric_cols[0]:
+                                    alpha_val = metrics_df.loc['Strategy', 'Alpha']
+                                    st.metric("Alpha (Annual)", 
+                                             f"{alpha_val*100:.2f}%" if pd.notnull(alpha_val) else "N/A",
+                                             delta="Excess return" if alpha_val > 0 else "Underperformance")
+                                with metric_cols[1]:
+                                    beta_val = metrics_df.loc['Strategy', 'Beta']
+                                    st.metric("Beta", 
+                                             f"{beta_val:.3f}" if pd.notnull(beta_val) else "N/A",
+                                             delta="Higher volatility" if beta_val > 1 else "Lower volatility")
+                                with metric_cols[2]:
+                                    sharpe_val = metrics_df.loc['Strategy', 'Sharpe']
+                                    st.metric("Sharpe Ratio", 
+                                             f"{sharpe_val:.3f}" if pd.notnull(sharpe_val) else "N/A")
+                                with metric_cols[3]:
+                                    cagr_val = metrics_df.loc['Strategy', 'CAGR']
+                                    st.metric("CAGR", 
+                                             f"{cagr_val*100:.2f}%" if pd.notnull(cagr_val) else "N/A")
 
                             # Downloads
                             equity_csv = equity_df.to_csv(index=True)
@@ -969,149 +1147,220 @@ def main():
                         except Exception as e:
                             st.error(f"Backtest failed: {e}")
 
-                # Quarterly rankings code continues...
-                if not nav_data.empty:
-                    # Get the last 3 years of quarterly dates
-                    end_date = pd.Timestamp.now()
-                    start_date = end_date - pd.DateOffset(years=3)
+                # Predictive Analytics Tab
+                with tab4:
+                    st.header("🤖 Predictive Analytics (6-Month Forecast)")
+                    st.caption("Advanced time-series forecasting models for fund return prediction.")
 
-                    # Generate all quarters in the 3-year period
-                    all_quarters = pd.date_range(
-                        start=start_date,
-                        end=end_date,
-                        freq='Q'
-                    )
-
-                    # Create a DataFrame with all funds and all quarters
-                    columns = [f"{q.year} Q{q.quarter}" for q in all_quarters]
-                    rankings_df = pd.DataFrame(index=selected_funds, columns=columns, dtype='float64')
-
-                    # Debug: Print data availability
-                    print(f"\n=== Data Availability Check ===")
-                    print(f"Date range: {nav_data.index.min()} to {nav_data.index.max()}")
-                    print(f"Selected funds: {len(selected_funds)} funds")
-                    print(f"First few dates in data: {nav_data.index[:5].tolist()}")
-                    print(f"First few funds: {selected_funds[:5]}")
-                    print("\n=== Processing Quarters ===")
-
-                    # Calculate rankings for each quarter
-                    quarters_with_data = 0
-
-                    for date in all_quarters:
-                        # Get data for this specific quarter only
-                        start_date = date - pd.offsets.QuarterEnd() + pd.offsets.Day(1)  # Start of quarter
-                        q_data = nav_data[(nav_data.index >= start_date) & (nav_data.index <= date)]
-
-                        # Debug info for this quarter
-                        print(f"\nProcessing {date.year} Q{date.quarter} ({start_date} to {date}):")
-                        print(f"  - Found {len(q_data)} data points")
-
-                        # Skip if no data at all
-                        if q_data.empty:
-                            print("  - No data for this quarter")
-                            continue
-
-                        # Get funds with at least 2 data points in this quarter
-                        valid_funds = [col for col in selected_funds if col in q_data.columns and q_data[col].count() >= 2]
-
-                        print(f"  - Funds with enough data: {len(valid_funds)}/{len(selected_funds)}")
-
-                        if not valid_funds:
-                            print("  - No funds with enough data for this quarter")
-                            continue  # No funds with enough data for this quarter
-
-                        try:
-                            # Calculate composite scores for this quarter
-                            # Ensure we have benchmark data for this period
-                            q_benchmark = benchmark_series[(benchmark_series.index >= start_date) &
-                                                         (benchmark_series.index <= date)]
-
-                            if q_benchmark.empty or len(q_benchmark) < 2:
-                                print(f"  - Not enough benchmark data for {date.year} Q{date.quarter}")
-                                continue
-
-                            print(f"  - Calculating composite scores for {len(valid_funds)} funds")
-
-                            q_metrics = calculate_composite_score(
-                                nav_data=q_data[valid_funds],  # Only use funds with enough data
-                                benchmark_series=q_benchmark,
-                                risk_free_rate=risk_free_rate,
-                                metrics_weights=metrics_weights
-                            )
-
-                            if not q_metrics.empty and 'composite_score' in q_metrics.columns:
-                                rank_col = f"{date.year} Q{date.quarter}"
-                                # Initialize series with NaN for all funds
-                                ranked = pd.Series(index=selected_funds, dtype='float64')
-                                # Fill in ranks for funds with valid data
-                                ranked[q_metrics.index] = q_metrics['composite_score'].rank(ascending=False, method='min')
-                                # Add to our rankings DataFrame
-                                rankings_df[rank_col] = ranked.astype('Int64')
-                                quarters_with_data += 1
-
-                        except Exception as e:
-                            print(f"Error calculating quarterly composite for {date}: {str(e)}")
-                            continue
-
-                    if quarters_with_data == 0:
-                        print("\n=== No quarters with valid data found. Summary: ===")
-                        print(f"- Total quarters checked: {len(all_quarters)}")
-                        print(f"- Data date range: {nav_data.index.min()} to {nav_data.index.max()}")
-                        print(f"- Number of funds with data: {len([f for f in selected_funds if f in nav_data.columns])}/{len(selected_funds)}")
-                        print(f"- First few dates in data: {nav_data.index[:5].tolist()}")
-                        st.warning("Insufficient historical data to generate quarterly rankings. Need at least one quarter with valid data.")
-                        return
-
-                    # Convert to numeric, ensuring all values are properly converted
-                    rankings_df = rankings_df.apply(pd.to_numeric, errors='coerce')
-
-                    # Only convert to Int64 if all values are finite numbers or NaN
-                    def safe_convert_to_int(series):
-                        # Check if all non-NA values are whole numbers
-                        if (series.dropna() % 1 == 0).all():
-                            return series.astype('Int64')
-                        return series
-
-                    rankings_df = rankings_df.apply(safe_convert_to_int)
-
-                    # Drop columns that are all NaN
-                    rankings_df = rankings_df.dropna(axis=1, how='all')
-
-                    # Sort columns chronologically
-                    if not rankings_df.empty and len(rankings_df.columns) > 0:
-                        rankings_df = rankings_df[sorted(rankings_df.columns)]
-
-                    if 'rankings_df' in locals() and not rankings_df.empty:
-                        # Add current rank as the last column if we have composite scores
-                        if 'composite_score' in metrics_df.columns:
-                            current_rank = metrics_df['composite_score'].rank(ascending=False).astype(int)
-                            rankings_df['Current Rank'] = current_rank
-
-                        # Display the rankings table
-                        st.subheader("Quarterly Rankings (Lower is Better)")
-                        st.dataframe(
-                            rankings_df,
-                            use_container_width=True,
-                            height=min(800, 100 + 35 * len(rankings_df)),
-                            column_config={
-                                col: st.column_config.NumberColumn(
-                                    col,
-                                    format="%d",
-                                    help=f"Ranking as of {col} (1 = best)"
-                                ) for col in rankings_df.columns
-                            }
+                    # Model selection with detailed info
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        model_choice = st.selectbox(
+                            "Forecast model",
+                            ["LSTM (Deep Learning)", "AR(1)", "Mean", "GB"],
+                            index=0,
+                            help="Select the forecasting model to use for predictions."
                         )
+                    with col2:
+                        horizon_m = st.slider("Forecast horizon (months)", min_value=3, max_value=12, value=6, step=1)
+                    
+                    # Display model information
+                    if model_choice == "LSTM (Deep Learning)":
+                        st.info("""
+                        **LSTM (Long Short-Term Memory)**
+                        - Deep learning model optimized for time series
+                        - Architecture: 2 LSTM layers (64→32 units) + Dense layers
+                        - Hyperparameter tuning: Early stopping, learning rate reduction
+                        - Lookback window: 12 months
+                        - Best for: Capturing complex non-linear patterns
+                        - Training: Auto-tuned with 80/20 train/val split
+                        """)
+                    elif model_choice == "GB":
+                        st.info("**Gradient Boosting**: Uses engineered features (lags, rolling stats, drawdowns) to learn patterns.")
+                    elif model_choice == "AR(1)":
+                        st.info("**AR(1)**: Simple autoregressive model where next return depends on last return.")
                     else:
-                        st.warning("Insufficient historical data to generate quarterly rankings. Need at least 3 months of data.")
+                        st.info("**Mean**: Uses historical average as forecast (baseline model).")
 
-                    # Add download button for rankings
-                    csv = rankings_df.to_csv()
-                    st.download_button(
-                        label="📥 Download Quarterly Rankings",
-                        data=csv,
-                        file_name="quarterly_rankings.csv",
-                        mime="text/csv"
+                    # Funds to include for forecast (default selected funds)
+                    forecast_funds = st.multiselect(
+                        "Funds to forecast",
+                        options=sorted(filtered_nav_data.columns.tolist()),
+                        default=selected_funds,
+                        key="forecast_funds"
                     )
+
+                    if not forecast_funds:
+                        st.info("Select at least one fund to forecast.")
+                    else:
+                        nav_for_fc = filtered_nav_data[forecast_funds]
+                        
+                        # Show progress for LSTM (can be slow)
+                        if model_choice == 'LSTM (Deep Learning)':
+                            with st.spinner('Training LSTM models... This may take 1-2 minutes per fund.'):
+                                try:
+                                    models_map = {'*': 'LSTM'}
+                                    fc_monthly, fc_summary = forecast_next_6m_returns(
+                                        nav_data=nav_for_fc,
+                                        models=models_map,
+                                        horizon_months=horizon_m
+                                    )
+                                except ImportError as e:
+                                    st.error(f"TensorFlow not installed: {e}")
+                                    st.info("To use LSTM, install TensorFlow: `pip install tensorflow`")
+                                    fc_monthly, fc_summary = pd.DataFrame(), pd.DataFrame()
+                                except Exception as e:
+                                    st.error(f"LSTM forecast failed: {e}")
+                                    fc_monthly, fc_summary = pd.DataFrame(), pd.DataFrame()
+                        else:
+                            try:
+                                if model_choice == 'AR(1)':
+                                    models_map = {'*': 'AR1'}
+                                elif model_choice == 'Mean':
+                                    models_map = {'*': 'MEAN'}
+                                else:
+                                    models_map = {'*': 'GB'}
+                                fc_monthly, fc_summary = forecast_next_6m_returns(
+                                    nav_data=nav_for_fc,
+                                    models=models_map,
+                                    horizon_months=horizon_m
+                                )
+                            except Exception as e:
+                                st.error(f"Forecast failed: {e}")
+                                fc_monthly, fc_summary = pd.DataFrame(), pd.DataFrame()
+                        
+                        try:
+                            if fc_monthly.empty:
+                                st.warning("Insufficient data to produce forecasts.")
+                            else:
+                                st.subheader("Monthly Return Forecasts")
+                                # Heatmap-like view via dataframe styling (basic)
+                                st.dataframe(fc_monthly.applymap(lambda x: round(x, 4)), use_container_width=True)
+
+                                st.subheader("Cumulative Forecasted Return (Next {} Months)".format(horizon_m))
+                                # Bar chart for cumulative forecasted returns (robust to index name)
+                                fc_bar = fc_summary.reset_index()
+                                # Ensure fund name column is named 'Fund'
+                                if 'index' in fc_bar.columns:
+                                    fc_bar = fc_bar.rename(columns={'index': 'Fund'})
+                                else:
+                                    # Assume first column holds fund identifier
+                                    first_col = fc_bar.columns[0]
+                                    if first_col != 'Fund':
+                                        fc_bar = fc_bar.rename(columns={first_col: 'Fund'})
+                                # Standardize forecast column name
+                                if 'forecast_6m_return' in fc_bar.columns:
+                                    fc_bar = fc_bar.rename(columns={'forecast_6m_return': 'ForecastReturn'})
+                                fc_bar['ForecastReturnPct'] = fc_bar['ForecastReturn'] * 100
+                                fig_fc = px.bar(fc_bar, x='Fund', y='ForecastReturnPct', title='Forecasted Cumulative Return (%)')
+                                st.plotly_chart(fig_fc, use_container_width=True)
+
+                                # Top 6 funds by forecasted 6M return
+                                st.subheader("Top 6 Predicted Funds (Next {} Months)".format(horizon_m))
+                                top6 = fc_bar.sort_values('ForecastReturn', ascending=False).head(6).copy()
+                                # Format percentage column for display
+                                top6_display = top6[['Fund', 'ForecastReturn']].copy()
+                                top6_display['ForecastReturn'] = top6_display['ForecastReturn'].apply(lambda x: f"{x*100:.2f}%")
+                                st.dataframe(top6_display, use_container_width=True, hide_index=True)
+                                st.download_button(
+                                    label="📥 Download Top 6 Forecast (CSV)",
+                                    data=top6.to_csv(index=False),
+                                    file_name="top6_forecast.csv",
+                                    mime="text/csv",
+                                    key="dl_fc_top6"
+                                )
+
+                                # Show last 24 months actual monthly returns for context
+                                st.subheader("Recent Actual Monthly Returns (last 24 months)")
+                                monthly_rets = to_monthly_returns(nav_for_fc).tail(24)
+                                st.dataframe(monthly_rets.applymap(lambda x: round(x, 4)), use_container_width=True)
+
+                                # Downloads
+                                st.download_button(
+                                    label="📥 Download Monthly Forecasts",
+                                    data=fc_monthly.to_csv(index=True),
+                                    file_name="monthly_forecasts.csv",
+                                    mime="text/csv",
+                                    key="dl_fc_monthly"
+                                )
+                                st.download_button(
+                                    label="📥 Download Forecast Summary",
+                                    data=fc_summary.to_csv(index=True),
+                                    file_name="forecast_summary.csv",
+                                    mime="text/csv",
+                                    key="dl_fc_summary"
+                                )
+                        except Exception as e:
+                            st.error(f"Forecast failed: {e}")
+
+                # Documentation Tab
+                with tab5:
+                    st.header("📚 Documentation (Standard Definitions)")
+                    st.markdown("Standard, widely used definitions and formulas that match this app's calculations.")
+
+                    st.subheader("Glossary of Symbols")
+                    st.markdown("- **r_t**: periodic return at time t (daily).  - **r_{b,t}**: benchmark return at time t.  - **r_f**: annual risk‑free rate.  - **P**: periods/year (252).  - **T**: number of periods.  - **V_t**: portfolio value at t.")
+
+                    st.subheader("Annualized Return (CAGR)")
+                    st.markdown("Constant annual growth rate implied by the observed returns.")
+                    st.latex(r"\text{Annualized Return} = \left(\prod_{t=1}^{T} (1 + r_t)\right)^{\tfrac{P}{T}} - 1")
+
+                    st.subheader("Annual Volatility")
+                    st.markdown("Standard deviation of periodic returns, scaled to annual frequency.")
+                    st.latex(r"\sigma_{\text{annual}} = \operatorname{stdev}(r)\,\sqrt{P}")
+
+                    st.subheader("Sharpe Ratio")
+                    st.markdown("Excess return per unit of total volatility, annualized.")
+                    st.latex(r"\text{Sharpe} = \frac{\mathbb{E}(r - r_f/P)}{\operatorname{stdev}(r)}\,\sqrt{P}")
+
+                    st.subheader("Sortino Ratio")
+                    st.markdown("Excess return per unit of downside volatility (only negative returns), annualized.")
+                    st.latex(r"\text{Sortino} = \frac{\mathbb{E}(r - r_f/P)}{\operatorname{stdev}(r\,|\, r<0)}\,\sqrt{P}")
+
+                    st.subheader("Maximum Drawdown (MDD)")
+                    st.markdown("Largest peak‑to‑trough decline in value over the period.")
+                    st.latex(r"\text{MDD} = \min_t\left( \frac{V_t}{\max_{s\le t} V_s} - 1 \right)")
+
+                    st.subheader("Information Ratio (IR)")
+                    st.markdown("Average active return relative to its volatility (tracking error), annualized.")
+                    st.latex(r"\text{IR} = \frac{\mathbb{E}(r - r_b)}{\operatorname{stdev}(r - r_b)}\,\sqrt{P}")
+
+                    st.subheader("Tracking Error (TE)")
+                    st.markdown("Standard deviation of active returns versus the benchmark, annualized.")
+                    st.latex(r"\text{TE} = \operatorname{stdev}(r - r_b)\,\sqrt{P}")
+
+                    st.subheader("Beta and Alpha (annualized)")
+                    st.markdown("Beta: sensitivity to benchmark excess returns. Alpha: average excess return not explained by beta.")
+                    st.latex(r"\beta = \frac{\operatorname{Cov}(r - r_f/P,\ r_b - r_f/P)}{\operatorname{Var}(r_b - r_f/P)}")
+                    st.latex(r"\alpha_{\text{annual}} = \big(\mathbb{E}(r - r_f/P) - \beta\,\mathbb{E}(r_b - r_f/P)\big)\,P")
+
+                    st.subheader("Composite Ranking")
+                    st.markdown("Min–max normalize metrics to [0,1]; invert those where lower is better (volatility, drawdown, tracking error).")
+                    st.latex(r"x^{\text{norm}} = \frac{x - x_{\min}}{x_{\max} - x_{\min} + 10^{-10}}\quad,\quad x^{\text{norm}}_{\text{lower better}} = 1 - x^{\text{norm}}")
+                    st.markdown("Weighted sum yields the composite score used for ranking:")
+                    st.latex(r"\text{Composite} = \sum_i |w_i|\, m_i^{\text{norm}}")
+
+                    st.subheader("Preset Strategies (Conceptual)")
+                    st.markdown("- Momentum: emphasize higher returns and Sharpe; penalize beta and drawdown.")
+                    st.markdown("- Consistency: emphasize Sortino and Information Ratio; penalize drawdown and volatility.")
+                    st.markdown("- Risk‑Adjusted: emphasize Sharpe and Sortino with drawdown control.")
+
+                    st.subheader("Backtesting Overview")
+                    st.markdown("Rebalance on a schedule, compute metrics over a lookback, rank by composite, hold Top‑N equally to next rebalance, compare equity curve vs benchmark, report CAGR/Vol/Sharpe/MDD/Total Return.")
+
+                    st.subheader("Forecasting Overview")
+                    st.markdown("- **Mean**: forecast monthly return as historical mean.")
+                    st.markdown("- **AR(1)**: next return depends on last return (recursive multi‑step).")
+                    st.latex(r"r_t = c + \phi\, r_{t-1} \;\Rightarrow\; \widehat{r}_{t+h} = c + \phi\, \widehat{r}_{t+h-1}")
+                    st.markdown("- **Gradient Boosting**: learn nonlinear patterns from engineered features (lag1, rolling means/stds, drawdowns).")
+                    st.markdown("- **LSTM (Long Short-Term Memory)**: Deep learning model with 2-layer architecture (64→32 LSTM units + Dense layers).")
+                    st.markdown("  - Hyperparameter optimization: Early stopping (patience=10), learning rate reduction (ReduceLROnPlateau)")
+                    st.markdown("  - Data normalization: Z-score standardization")
+                    st.markdown("  - Lookback window: 12 months")
+                    st.markdown("  - Train/validation split: 80/20")
+                    st.markdown("  - Dropout layers (0.2, 0.2, 0.1) for regularization")
+                    st.markdown("  - Optimizer: Adam (lr=0.001)")
+                    st.markdown("  - Loss: Mean Squared Error (MSE)")
 
         except Exception as e:
             st.error(f"An error occurred: {str(e)}")
