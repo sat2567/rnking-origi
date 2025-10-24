@@ -21,7 +21,7 @@ from src import visualization
 import src.ranking as ranking
 from src.backtesting import run_backtest
 from src.ranking import calculate_composite_score, get_top_funds
-from src.forecasting import forecast_next_6m_returns, to_monthly_returns
+#from src.forecasting import forecast_next_6m_returns, to_monthly_returns
 
 # Set page config
 st.set_page_config(
@@ -361,7 +361,7 @@ def main():
                     "Performance Metrics",
                     "Ranking Metrics",
                     "Backtesting",
-                    "Predictive Analytics",
+                  #  "Predictive Analytics",
                     "Documentation"
                 ])
 
