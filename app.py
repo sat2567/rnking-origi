@@ -357,7 +357,7 @@ def main():
                 st.markdown("---")  # Separator
 
                 # Create tabs for different sections
-                tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                tab1, tab2, tab3,  tab5 = st.tabs([
                     "Performance Metrics",
                     "Ranking Metrics",
                     "Backtesting",
@@ -1148,7 +1148,7 @@ def main():
                             st.error(f"Backtest failed: {e}")
 
                 # Predictive Analytics Tab
-                with tab4:
+                '''with tab4:
                     st.header("🤖 Predictive Analytics (6-Month Forecast)")
                     st.caption("Advanced time-series forecasting models for fund return prediction.")
 
@@ -1291,7 +1291,7 @@ def main():
                                     key="dl_fc_summary"
                                 )
                         except Exception as e:
-                            st.error(f"Forecast failed: {e}")
+                            st.error(f"Forecast failed: {e}")'''
 
                 # Documentation Tab
                 with tab5:
