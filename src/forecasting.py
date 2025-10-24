@@ -1,4 +1,4 @@
-"""from __future__ import annotations
+'''from __future__ import annotations
 import pandas as pd
 import numpy as np
 from typing import Dict, Tuple
@@ -347,4 +347,4 @@ def forecast_next_6m_returns(
         'forecast_6m_return': cumret
     }).sort_values('forecast_6m_return', ascending=False)
 
-    return forecasts, summary
+    return forecasts, summary'''
